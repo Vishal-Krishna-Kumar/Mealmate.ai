@@ -21,7 +21,7 @@ from typing import Any
 from .cache import get_cache, make_key
 from .metrics import record_llm_call
 
-DEFAULT_MODEL = "gemini-3.5-flash"
+DEFAULT_MODEL = "gemini-2.5-flash"
 
 
 def is_available() -> bool:
@@ -143,11 +143,32 @@ def generate_chat(
     except Exception:  # pragma: no cover - network path
         record_llm_call("chat", "api_error")
         return None
-    text = getattr(resp, "text", None)
-    if text:
-        cache.set(key, text)
-        record_llm_call("chat", "ok")
-    return text or None
+    # `resp.text` is a convenience accessor that raises when the response has
+    # no usable text part (e.g. blocked by safety, finish_reason != STOP).
+    # Mirror the candidates-fallback in `generate_text` so chat is just as
+    # robust as one-shot generation.
+    text: str | None
+    try:
+        text = getattr(resp, "text", None)
+    except Exception:
+        text = None
+    if not text:
+        try:
+            text = resp.candidates[0].content.parts[0].text  # type: ignore[index]
+        except Exception:
+            text = None
+    if not text:
+        # Surface the finish reason so logs make the failure debuggable.
+        finish = None
+        try:
+            finish = getattr(resp.candidates[0], "finish_reason", None)
+        except Exception:
+            pass
+        record_llm_call("chat", f"empty_response:{finish}" if finish else "empty_response")
+        return None
+    cache.set(key, text)
+    record_llm_call("chat", "ok")
+    return text
 
 
 def embed_text(text: str) -> list[float] | None:

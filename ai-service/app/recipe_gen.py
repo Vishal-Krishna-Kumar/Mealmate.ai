@@ -96,6 +96,12 @@ def _fetch_wikipedia_image(query: str) -> str | None:
     Uses the public MediaWiki API (no key, no rate-limit headache for low
     volume) with ``generator=search`` + ``prop=pageimages`` to fetch the
     page image of the most relevant article in a single call.
+
+    We require the matched article's title to share at least one
+    non-stopword token (>= 4 chars) with the query. Without this guard,
+    fuzzy MediaWiki search happily returns unrelated photos for
+    niche / AI-coined dish names (e.g. it returns a paprika photo for
+    "Spicy Indian Lobster Masala").
     """
     if not query.strip():
         return None
@@ -120,8 +126,23 @@ def _fetch_wikipedia_image(query: str) -> str | None:
         logger.debug("wikipedia image lookup failed for %r: %s", query, exc)
         return None
 
+    # Build the set of meaningful query tokens we'll compare the article
+    # title against.
+    query_tokens = {
+        t for t in query.lower().split() if len(t) >= 4 and t.isalpha()
+    }
     pages = (data.get("query") or {}).get("pages") or {}
     for page in pages.values():
+        title = str(page.get("title") or "").lower()
+        title_tokens = {t.strip(",.()") for t in title.split() if len(t) >= 4}
+        # Reject obviously off-topic results when we have query tokens to
+        # check against. If the query was pure stopwords/short words, we
+        # accept whatever Wikipedia returned.
+        if query_tokens and not (query_tokens & title_tokens):
+            logger.debug(
+                "wikipedia image rejected: query=%r article=%r", query, title
+            )
+            continue
         thumb = page.get("thumbnail") or {}
         if thumb.get("source"):
             return str(thumb["source"])
@@ -129,6 +150,34 @@ def _fetch_wikipedia_image(query: str) -> str | None:
         if orig.get("source"):
             return str(orig["source"])
     return None
+
+
+def _pollinations_image_url(query: str) -> str | None:
+    """Always-available fallback that returns a Pollinations.AI text-to-image URL.
+
+    Pollinations exposes a free, key-less endpoint at
+    ``https://image.pollinations.ai/prompt/<encoded prompt>`` that returns a
+    generated image directly. We use it when the user asks for an unusual
+    dish that Wikipedia doesn't index (e.g. ``Spicy Indian Lobster Masala``)
+    so the generated recipe card still has a real visual.
+
+    The URL is constructed deterministically (no HTTP call from our side)
+    so this never fails or blocks; if the upstream is down the client just
+    falls back to its placeholder image.
+    """
+    q = query.strip()
+    if not q:
+        return None
+    prompt = f"{q}, food photography, professional plating, top down, natural light"
+    encoded = urllib.parse.quote(prompt, safe="")
+    # ``nologo=true`` removes the Pollinations watermark.
+    # ``seed`` is derived from the query so the same dish always gets the
+    # same image across requests (stable caching, predictable UX).
+    seed = abs(hash(q.lower())) % 100_000
+    return (
+        "https://image.pollinations.ai/prompt/"
+        f"{encoded}?width=600&height=400&nologo=true&seed={seed}"
+    )
 
 
 def _violates_allergy(recipe: GeneratedRecipe, allergies: list[str]) -> str | None:
@@ -194,7 +243,15 @@ def generate(req: GenerateRecipeRequest) -> GenerateRecipeResponse:
         )
 
     # Image lookup is best-effort and never blocks saving the recipe.
-    img = _fetch_wikipedia_image(recipe.title) or _fetch_wikipedia_image(req.query)
+    # Try Wikipedia first (real photos of real-world dishes); if no hit,
+    # fall back to a Pollinations.AI generated image so AI-coined or
+    # niche dishes still have a relevant visual.
+    img = (
+        _fetch_wikipedia_image(recipe.title)
+        or _fetch_wikipedia_image(req.query)
+        or _pollinations_image_url(recipe.title)
+        or _pollinations_image_url(req.query)
+    )
     if img:
         recipe.image_url = img
 

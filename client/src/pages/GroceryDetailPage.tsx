@@ -182,7 +182,7 @@ export function GroceryDetailPage() {
                           onChange={() => toggle(item)}
                           className="mt-1 h-4 w-4 rounded border-gray-300 text-brand-600 focus:ring-brand-500"
                         />
-                        <span className="flex flex-1 flex-col">
+                        <span className="flex flex-1 flex-col gap-1">
                           <span
                             className={cn(
                               'capitalize transition',
@@ -192,20 +192,51 @@ export function GroceryDetailPage() {
                             {item.ingredient}
                           </span>
                           {item.sources && item.sources.length > 0 && (
-                            <span
-                              className={cn(
-                                'mt-0.5 text-[11px] text-gray-500',
-                                item.checked && 'text-gray-300 line-through'
-                              )}
-                              title={item.sources
-                                .map((s) =>
+                            <span className="flex flex-wrap items-center gap-1.5">
+                              <span className="text-[11px] uppercase tracking-wide text-gray-400">
+                                for
+                              </span>
+                              {item.sources.map((s, idx) => {
+                                const qty =
                                   s.quantity && s.unit
-                                    ? `${s.title} (${Math.round(s.quantity * 10) / 10} ${s.unit})`
-                                    : s.title
-                                )
-                                .join(', ')}
-                            >
-                              for {item.sources.map((s) => s.title).join(' · ')}
+                                    ? `${Math.round(s.quantity * 10) / 10} ${s.unit}`
+                                    : s.quantity
+                                      ? String(Math.round(s.quantity * 10) / 10)
+                                      : null;
+                                const chipClasses = cn(
+                                  'inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[11px] font-medium transition',
+                                  item.checked
+                                    ? 'bg-gray-100 text-gray-400'
+                                    : 'bg-brand-50 text-brand-700 hover:bg-brand-100'
+                                );
+                                const content = (
+                                  <>
+                                    <span className="truncate max-w-[16ch]">{s.title}</span>
+                                    {qty && (
+                                      <span className="text-brand-500/80">· {qty}</span>
+                                    )}
+                                  </>
+                                );
+                                return s.recipe && !item.checked ? (
+                                  <Link
+                                    key={`${s.recipe}-${idx}`}
+                                    to={`/recipes/${s.recipe}`}
+                                    className={chipClasses}
+                                    title={`Open ${s.title}`}
+                                    onClick={(e) => e.stopPropagation()}
+                                  >
+                                    {content}
+                                  </Link>
+                                ) : (
+                                  <span
+                                    key={`${s.title}-${idx}`}
+                                    className={chipClasses}
+                                    title={s.title}
+                                  >
+                                    {content}
+                                  </span>
+                                );
+                              })}
                             </span>
                           )}
                         </span>

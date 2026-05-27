@@ -108,3 +108,47 @@ export function useDeleteRecipe() {
     },
   });
 }
+
+export interface GenerateRecipeInput {
+  query: string;
+  dietaryPreferences?: string[];
+  allergies?: string[];
+}
+
+export interface GenerateRecipeResult {
+  recipe: Recipe;
+  /** The query the AI service actually used (may differ from the input if
+   * a compound request was simplified on retry). */
+  usedQuery: string;
+  generated: true;
+}
+
+/**
+ * AI-driven recipe generation. Called from the planner's recipe picker
+ * ("Generate with AI" button) and any future "Create with AI" flow.
+ *
+ * On success the new recipe is persisted server-side and added to the
+ * cache; the returned object includes its real MongoDB id so the caller
+ * can immediately assign it to a meal slot.
+ */
+export function useGenerateRecipe() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async (input: GenerateRecipeInput): Promise<GenerateRecipeResult> => {
+      const { data } = await api.post<{
+        success: true;
+        recipe: Recipe;
+        usedQuery: string;
+        generated: true;
+      }>('/recipes/generate', input, { timeout: 60_000 });
+      return {
+        recipe: normalize(data.recipe),
+        usedQuery: data.usedQuery,
+        generated: true,
+      };
+    },
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['recipes'] });
+    },
+  });
+}

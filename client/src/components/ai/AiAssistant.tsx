@@ -283,6 +283,11 @@ function AppliedActionCard({ action }: { action: AppliedAction }) {
           alt={recipe.title}
           className="h-28 w-full object-cover"
           loading="lazy"
+          onError={(e) => {
+            // Hide gracefully if the URL is broken or blocked — we don't have
+            // local state in this card so just remove the element.
+            (e.currentTarget as HTMLImageElement).style.display = 'none';
+          }}
         />
       )}
       <div className="px-3 py-2">

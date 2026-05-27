@@ -155,6 +155,28 @@ def _fallback_reply(req: ChatRequest) -> str:
     return " ".join(bits)
 
 
+def _model_error_reply(req: ChatRequest) -> str:
+    """When Gemini IS configured but the call returned nothing (transient failure).
+
+    This is different from the no-key path — telling the user to "set the API
+    key" when the key is already set is misleading and confusing. Common
+    causes: safety filter triggered on the user's input, intermittent
+    upstream timeout, prompt token-limit overrun, or a compound request the
+    model declined to fulfil in one shot.
+    """
+    last = req.messages[-1].content if req.messages else ""
+    bits = [
+        "I had trouble getting a response from the AI model just now — it "
+        "came back empty.",
+        "This usually clears up if you try again or rephrase. If your "
+        "request had multiple parts (e.g. \"add salad AND nutella bread\"), "
+        "try asking for one thing at a time.",
+    ]
+    if last:
+        bits.append(f"(Your message: \"{last[:140]}\")")
+    return " ".join(bits)
+
+
 def _coerce_actions(raw: Any) -> list[ChatAction]:
     """Best-effort: turn whatever the LLM gave us into validated ChatAction objects."""
     if not isinstance(raw, list):
@@ -197,7 +219,7 @@ def reply(req: ChatRequest) -> ChatResponse:
     )
     if not text:
         return ChatResponse(
-            reply=_fallback_reply(req),
+            reply=_model_error_reply(req),
             strategy="fallback",
             suggestions=_DEFAULT_SUGGESTIONS,
         )

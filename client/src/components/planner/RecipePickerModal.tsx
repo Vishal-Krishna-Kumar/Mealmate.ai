@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { useRecipes } from '@/hooks/useRecipes';
+import { useGenerateRecipe, useRecipes } from '@/hooks/useRecipes';
 import { useDebounce } from '@/hooks/useDebounce';
 import { Input } from '@/components/ui/Input';
 import { Button } from '@/components/ui/Button';
@@ -13,16 +13,31 @@ interface RecipePickerModalProps {
 
 export function RecipePickerModal({ open, title, onClose, onPick }: RecipePickerModalProps) {
   const [search, setSearch] = useState('');
+  const [genError, setGenError] = useState<string | null>(null);
   const debounced = useDebounce(search, 300);
   const { data, isLoading } = useRecipes({
     q: debounced || undefined,
     limit: 20,
     page: 1,
   });
+  const generate = useGenerateRecipe();
 
   useEffect(() => {
-    if (!open) setSearch('');
+    if (!open) {
+      setSearch('');
+      setGenError(null);
+      generate.reset();
+    }
+    // We intentionally don't include `generate` in the dep array — calling
+    // .reset() on every render would loop. Only run when `open` changes.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open]);
+
+  // Clear stale errors as soon as the user edits the search box.
+  useEffect(() => {
+    if (genError) setGenError(null);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [search]);
 
   useEffect(() => {
     function onKey(e: KeyboardEvent) {
@@ -33,6 +48,28 @@ export function RecipePickerModal({ open, title, onClose, onPick }: RecipePicker
   }, [open, onClose]);
 
   if (!open) return null;
+
+  const trimmedSearch = debounced.trim();
+  const noResults =
+    !isLoading && data !== undefined && data.items.length === 0;
+  const canGenerate = noResults && trimmedSearch.length >= 3;
+
+  async function handleGenerate() {
+    if (!canGenerate || generate.isPending) return;
+    setGenError(null);
+    try {
+      const { recipe } = await generate.mutateAsync({ query: trimmedSearch });
+      // Immediately assign the freshly-generated recipe to the meal slot.
+      onPick(recipe.id);
+    } catch (err) {
+      const message =
+        (err as { response?: { data?: { message?: string } }; message?: string })
+          ?.response?.data?.message ||
+        (err as Error)?.message ||
+        'Failed to generate recipe.';
+      setGenError(message);
+    }
+  }
 
   return (
     <div
@@ -82,13 +119,62 @@ export function RecipePickerModal({ open, title, onClose, onPick }: RecipePicker
               </button>
             </li>
           ))}
-          {!isLoading && data && data.items.length === 0 && (
-            <li className="p-3 text-sm text-gray-500">No matches.</li>
+          {noResults && (
+            <li className="space-y-3 p-3 text-sm">
+              <p className="text-gray-600">
+                No recipes in your library match{' '}
+                <span className="font-medium text-gray-900">
+                  &ldquo;{trimmedSearch || search}&rdquo;
+                </span>
+                .
+              </p>
+              {canGenerate ? (
+                <>
+                  <p className="text-xs text-gray-500">
+                    MealMate AI can draft one for you using web knowledge and add it
+                    straight to this slot — works for any cuisine or dish, even ones
+                    we don&rsquo;t stock yet.
+                  </p>
+                  <button
+                    type="button"
+                    onClick={handleGenerate}
+                    disabled={generate.isPending}
+                    className="flex w-full items-center justify-center gap-2 rounded-lg bg-gradient-to-r from-brand-600 to-emerald-600 px-4 py-2 text-sm font-semibold text-white shadow-sm transition hover:from-brand-700 hover:to-emerald-700 disabled:cursor-not-allowed disabled:opacity-60"
+                  >
+                    {generate.isPending ? (
+                      <>
+                        <span className="inline-block h-3 w-3 animate-spin rounded-full border-2 border-white border-t-transparent" />
+                        Generating…
+                      </>
+                    ) : (
+                      <>
+                        <span aria-hidden>✨</span>
+                        Generate &ldquo;{trimmedSearch}&rdquo; with AI
+                      </>
+                    )}
+                  </button>
+                  {genError && (
+                    <p className="rounded-md bg-red-50 px-2 py-1.5 text-xs text-red-700">
+                      {genError}
+                    </p>
+                  )}
+                </>
+              ) : (
+                <p className="text-xs text-gray-400">
+                  Type at least 3 characters to generate with AI.
+                </p>
+              )}
+            </li>
           )}
         </ul>
 
         <div className="mt-3 flex justify-end">
-          <Button variant="secondary" size="sm" onClick={onClose}>
+          <Button
+            variant="secondary"
+            size="sm"
+            onClick={onClose}
+            disabled={generate.isPending}
+          >
             Cancel
           </Button>
         </div>

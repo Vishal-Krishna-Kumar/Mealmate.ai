@@ -18,6 +18,8 @@
 import { Types } from 'mongoose';
 import { MealPlan, DAYS_OF_WEEK, type DayOfWeek, type IDayPlan } from '../models/MealPlan';
 import { Recipe, type IRecipe, type IRecipeIngredient } from '../models/Recipe';
+import { GroceryList } from '../models/GroceryList';
+import { aggregateGroceryItems, collectRecipesFromPlan } from '../utils/groceryAggregator';
 import { broadcastMealPlan } from './realtime';
 import { generateRecipe, type GeneratedRecipe } from './aiClient';
 import { logger } from '../config/logger';
@@ -91,6 +93,48 @@ function escapeRegex(text: string): string {
   return text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
+/**
+ * Generic culinary adjectives, cuisine names, meal-time labels and other
+ * filler words. When the user says "spicy indian lobster masala", these
+ * tokens are NOT useful for fuzzy-matching against the recipe library
+ * because they'd match dozens of unrelated dishes (e.g. "spicy" would
+ * collide with "Spicy Tuna Sushi Bowl"). We strip them before scoring.
+ */
+const MATCH_STOPWORDS = new Set<string>([
+  // Quality / heat / texture adjectives
+  'spicy', 'mild', 'medium', 'hot', 'sweet', 'savory', 'savoury', 'salty',
+  'sour', 'bitter', 'tangy', 'creamy', 'crispy', 'crunchy', 'tender', 'juicy',
+  // Difficulty / time / health adjectives
+  'easy', 'quick', 'simple', 'fast', 'classic', 'traditional', 'authentic',
+  'healthy', 'hearty', 'light', 'fresh', 'homemade', 'gourmet', 'fancy',
+  'best', 'perfect', 'ultimate', 'amazing', 'delicious', 'tasty',
+  // Cuisine / region words
+  'indian', 'italian', 'asian', 'chinese', 'japanese', 'mexican', 'french',
+  'american', 'korean', 'vietnamese', 'thai', 'mediterranean', 'european',
+  'southern', 'northern', 'eastern', 'western', 'greek', 'turkish', 'spanish',
+  'moroccan', 'lebanese', 'persian',
+  // Meal slots / serving style
+  'breakfast', 'brunch', 'lunch', 'dinner', 'supper', 'snack', 'dessert',
+  'appetizer', 'starter', 'side', 'main', 'course',
+  // Filler
+  'style', 'recipe', 'dish', 'meal', 'food', 'with', 'and', 'the', 'for',
+  'new', 'old', 'real',
+]);
+
+function significantTokens(query: string): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const raw of query.toLowerCase().split(/\s+/)) {
+    const t = raw.replace(/[^a-z0-9]/g, '');
+    if (t.length < 4) continue;
+    if (MATCH_STOPWORDS.has(t)) continue;
+    if (seen.has(t)) continue;
+    seen.add(t);
+    out.push(t);
+  }
+  return out;
+}
+
 /** Find a recipe matching the LLM-provided query, with several fallbacks. */
 async function resolveRecipe(query: string): Promise<IRecipe & { _id: Types.ObjectId } | null> {
   const trimmed = query.trim();
@@ -109,7 +153,7 @@ async function resolveRecipe(query: string): Promise<IRecipe & { _id: Types.Obje
   });
   if (exactTitle) return exactTitle as IRecipe & { _id: Types.ObjectId };
 
-  // 3. Substring on title — pick the shortest match (closest to the query).
+  // 3. Whole-query substring on title (e.g. "chicken biryani" -> "Chicken Biryani Bowl").
   const substring = await Recipe.find({
     title: new RegExp(escapeRegex(trimmed), 'i'),
   })
@@ -120,21 +164,37 @@ async function resolveRecipe(query: string): Promise<IRecipe & { _id: Types.Obje
     return substring[0] as IRecipe & { _id: Types.ObjectId };
   }
 
-  // 4. Token-overlap fallback — split the query into significant words and
-  //    look for recipes whose title contains the longest one. Helps when the
-  //    user names a regional dish but the DB has a different exact name
-  //    (e.g. "biryani" -> "Chicken Biryani Bowl").
-  const tokens = trimmed
-    .split(/\s+/)
-    .map((t) => t.replace(/[^a-z0-9]/gi, ''))
-    .filter((t) => t.length >= 4)
-    .sort((a, b) => b.length - a.length);
-  for (const token of tokens) {
-    const hit = await Recipe.findOne({
-      title: new RegExp(escapeRegex(token), 'i'),
-    });
-    if (hit) return hit as IRecipe & { _id: Types.ObjectId };
+  // 4. Token-overlap fallback with stopword filtering and multi-token scoring.
+  //    Previously this returned the first hit on the LONGEST single token,
+  //    which caused generic adjectives ("spicy", "indian") to match unrelated
+  //    recipes. We now require either:
+  //      (a) the candidate title to contain >= 2 distinct significant tokens, OR
+  //      (b) the query has a single significant token and that token is
+  //          specific enough (>= 6 chars, e.g. "biryani", "carbonara").
+  //    Otherwise we return null and let the caller fall through to AI
+  //    generation, which produces a real recipe for the requested dish.
+  const tokens = significantTokens(trimmed);
+  if (tokens.length === 0) return null;
+
+  const orPattern = tokens.map(escapeRegex).join('|');
+  const candidates = await Recipe.find({ title: new RegExp(orPattern, 'i') }).limit(50);
+
+  let best: (IRecipe & { _id: Types.ObjectId }) | null = null;
+  let bestScore = 0;
+  let bestTitleLen = Number.POSITIVE_INFINITY;
+  for (const c of candidates) {
+    const title = c.title.toLowerCase();
+    const score = tokens.reduce((acc, t) => (title.includes(t) ? acc + 1 : acc), 0);
+    if (score > bestScore || (score === bestScore && title.length < bestTitleLen)) {
+      best = c as IRecipe & { _id: Types.ObjectId };
+      bestScore = score;
+      bestTitleLen = title.length;
+    }
   }
+
+  if (!best) return null;
+  if (bestScore >= 2) return best;
+  if (bestScore === 1 && tokens.length === 1 && (tokens[0]?.length ?? 0) >= 6) return best;
   return null;
 }
 
@@ -152,7 +212,7 @@ function isSlot(value: unknown): value is Slot {
  * instead of failing on the unique index. Returns the saved doc, or `null`
  * if the LLM produced an unusable payload.
  */
-async function saveGeneratedRecipe(
+export async function saveGeneratedRecipe(
   userId: string,
   gen: GeneratedRecipe
 ): Promise<(IRecipe & { _id: Types.ObjectId }) | null> {
@@ -203,6 +263,117 @@ async function saveGeneratedRecipe(
   }
 }
 
+/**
+ * Re-aggregate the meal plan's recipes into a grocery list and upsert it.
+ *
+ * Called after the assistant adds a recipe to a plan so the user's shopping
+ * list stays in sync without a manual "Generate" click. If a list already
+ * exists for this (user, plan), we update its items in place and preserve
+ * the `checked` flag for any ingredient that's still present after the
+ * re-aggregation.
+ */
+async function upsertGroceryListForPlan(
+  userId: string,
+  mealPlanId: Types.ObjectId,
+  weekStartDate: Date
+): Promise<void> {
+  const populated = await MealPlan.findById(mealPlanId).populate(
+    'days.breakfast days.lunch days.dinner days.snacks',
+    'ingredients servings title'
+  );
+  if (!populated) return;
+
+  const recipes = collectRecipesFromPlan(
+    populated.days as unknown as Parameters<typeof collectRecipesFromPlan>[0]
+  );
+  if (recipes.length === 0) return;
+
+  const newItems = aggregateGroceryItems(recipes);
+  const existing = await GroceryList.findOne({
+    user: new Types.ObjectId(userId),
+    mealPlan: mealPlanId,
+  });
+
+  if (existing) {
+    const checkedMap = new Map<string, boolean>();
+    for (const item of existing.items) {
+      checkedMap.set(`${item.ingredient}::${item.unit ?? ''}`, item.checked);
+    }
+    for (const item of newItems) {
+      const key = `${item.ingredient}::${item.unit ?? ''}`;
+      if (checkedMap.has(key)) item.checked = checkedMap.get(key) ?? false;
+    }
+    existing.set('items', newItems);
+    existing.generatedAt = new Date();
+    await existing.save();
+    return;
+  }
+
+  await GroceryList.create({
+    user: new Types.ObjectId(userId),
+    mealPlan: mealPlanId,
+    name: `Groceries for week of ${weekStartDate.toISOString().slice(0, 10)}`,
+    items: newItems,
+  });
+}
+
+/**
+ * If the LLM emits a compound query like "fresh fruit salad and nutella
+ * bread", Gemini may refuse / return empty because it can't produce one
+ * coherent recipe for two unrelated dishes. We make one retry with a
+ * simplified query (the first half before " and / with / plus ").
+ *
+ * Returns the simplified query (different from the original) or null if no
+ * useful simplification could be derived.
+ */
+function simplifyCompoundQuery(query: string): string | null {
+  const trimmed = query.trim();
+  if (!trimmed) return null;
+  // Split on " and " / " with " / " plus " / " & " (whole words, case-insensitive).
+  const m = trimmed.split(/\s+(?:and|with|plus|&)\s+/i);
+  if (m.length >= 2) {
+    const head = m[0]?.trim();
+    if (head && head.length >= 3 && head.toLowerCase() !== trimmed.toLowerCase()) {
+      return head;
+    }
+  }
+  // Otherwise, if the query is unusually long (>= 7 words), take the last 4.
+  const words = trimmed.split(/\s+/).filter(Boolean);
+  if (words.length >= 7) {
+    const tail = words.slice(-4).join(' ');
+    if (tail.toLowerCase() !== trimmed.toLowerCase()) return tail;
+  }
+  return null;
+}
+
+/**
+ * Wrap `generateRecipe` with a single retry on simplified-query failure.
+ * Returns the GenerateRecipeResponse from the FIRST attempt that yielded a
+ * usable recipe, or the last (failed) response otherwise.
+ */
+export async function generateRecipeWithRetry(
+  query: string,
+  options: { dietary_preferences?: string[]; allergies?: string[] } = {}
+): Promise<{ result: Awaited<ReturnType<typeof generateRecipe>>; usedQuery: string }>
+{
+  const first = await generateRecipe({ query, ...options });
+  if (first.success && first.recipe) {
+    return { result: first, usedQuery: query };
+  }
+  const fallbackQuery = simplifyCompoundQuery(query);
+  if (!fallbackQuery) return { result: first, usedQuery: query };
+  logger.info(
+    { originalQuery: query, fallbackQuery, message: first.message },
+    'chatActions: retrying recipe generation with simplified query'
+  );
+  const second = await generateRecipe({ query: fallbackQuery, ...options });
+  if (second.success && second.recipe) {
+    return { result: second, usedQuery: fallbackQuery };
+  }
+  // Both attempts failed — surface the first failure (better signal).
+  return { result: first, usedQuery: query };
+}
+
 async function applyAddToPlan(
   userId: string,
   ctx: ChatActionContext,
@@ -236,10 +407,11 @@ async function applyAddToPlan(
 
   // No library match → ask the AI service to draft a full recipe and persist
   // it before assigning. Honours the user's dietary preferences + allergies.
+  // We retry once with a simplified query if the model rejects a compound
+  // request like "fresh fruit salad and nutella bread".
   if (!recipe) {
     try {
-      const gen = await generateRecipe({
-        query: recipeQuery,
+      const { result: gen, usedQuery } = await generateRecipeWithRetry(recipeQuery, {
         dietary_preferences: ctx.dietaryPreferences,
         allergies: ctx.allergies,
       });
@@ -251,7 +423,7 @@ async function applyAddToPlan(
         }
       } else if (gen.message) {
         logger.info(
-          { query: recipeQuery, message: gen.message },
+          { query: recipeQuery, usedQuery, message: gen.message },
           'chatActions: generator declined to produce a recipe'
         );
       }
@@ -298,6 +470,16 @@ async function applyAddToPlan(
       payload: plan,
       actorId: userId,
     });
+
+    // Best-effort: keep the grocery list for this plan in sync so the user
+    // doesn't have to click "Generate grocery list" again every time the
+    // assistant adds a recipe. Failures are swallowed — the meal-plan
+    // update itself must always succeed.
+    try {
+      await upsertGroceryListForPlan(userId, plan._id, weekStartDate);
+    } catch (err) {
+      logger.warn({ err, mealPlanId: String(plan._id) }, 'chatActions: grocery sync failed');
+    }
 
     return {
       type: 'add_to_plan',

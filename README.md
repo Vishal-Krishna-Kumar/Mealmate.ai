@@ -144,7 +144,7 @@ The defaults already work out of the box:
 
 - `server/.env` — `MONGO_URI=mongodb://127.0.0.1:27017/mealmate`, dev `JWT_SECRET`, `AI_SERVICE_URL=http://localhost:8000`. **Replace `JWT_SECRET` with a fresh 48+ char random string before any deployment.**
 - `client/.env` — points Vite at the local API and AI service.
-- `ai-service/.env` — leaves `GEMINI_API_KEY=` empty. Paste your Google AI Studio key here to enable the cooking assistant, smart pantry paste, vision pantry capture, and the LLM-backed week planner. Without a key, every AI surface degrades gracefully to its deterministic offline path.
+- `ai-service/.env` — leaves `GEMINI_API_KEY=` empty. Paste your Google AI Studio key here to enable the cooking assistant, smart pantry paste, vision pantry capture, and the LLM-backed week planner. The default model is **`gemini-3.5-flash`** (override via `GEMINI_MODEL`). Without a key, every AI surface degrades gracefully to its deterministic offline path.
 
 ### 4. Start the four services (four terminals)
 

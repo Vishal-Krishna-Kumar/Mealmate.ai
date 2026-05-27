@@ -51,6 +51,18 @@ export const recipeIdParamSchema = z.object({
   id: z.string().regex(/^[a-fA-F0-9]{24}$/, 'Invalid recipe id'),
 });
 
+/**
+ * Body for the AI-driven recipe generation endpoint. Used from the planner
+ * picker ("Generate with AI" button) when the user types a dish that isn't
+ * in their library.
+ */
+export const generateRecipeSchema = z.object({
+  query: z.string().trim().min(2).max(200),
+  dietaryPreferences: z.array(z.string().trim().toLowerCase().max(40)).max(20).optional(),
+  allergies: z.array(z.string().trim().toLowerCase().max(40)).max(20).optional(),
+});
+
 export type CreateRecipeInput = z.infer<typeof createRecipeSchema>;
 export type UpdateRecipeInput = z.infer<typeof updateRecipeSchema>;
 export type ListRecipesQuery = z.infer<typeof listRecipesQuerySchema>;
+export type GenerateRecipeInput = z.infer<typeof generateRecipeSchema>;

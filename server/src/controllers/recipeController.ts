@@ -2,10 +2,13 @@ import type { FilterQuery, SortOrder } from 'mongoose';
 import { Recipe, type IRecipe } from '../models/Recipe';
 import { AppError } from '../utils/AppError';
 import { asyncHandler } from '../utils/asyncHandler';
+import { User } from '../models/User';
+import { generateRecipeWithRetry, saveGeneratedRecipe } from '../services/chatActions';
 import type {
   CreateRecipeInput,
   UpdateRecipeInput,
   ListRecipesQuery,
+  GenerateRecipeInput,
 } from '../validators/recipeSchemas';
 
 export const listRecipes = asyncHandler(async (req, res) => {
@@ -59,6 +62,60 @@ export const createRecipe = asyncHandler<unknown, unknown, CreateRecipeInput>(
     if (!req.user) throw AppError.unauthorized();
     const recipe = await Recipe.create({ ...req.body, createdBy: req.user.sub });
     res.status(201).json({ success: true, recipe });
+  }
+);
+
+/**
+ * AI-driven recipe generation endpoint.
+ *
+ * Used by the planner's recipe picker (and any future "create with AI"
+ * UI). The flow is:
+ *   1. Call the Python AI service via `generateRecipeWithRetry` (which
+ *      transparently retries once with a simplified query if the model
+ *      chokes on a compound request like "X and Y").
+ *   2. Persist the recipe via the same `saveGeneratedRecipe` helper used
+ *      by the chat-driven add-to-plan flow, so the result is a real
+ *      MongoDB document with `source: 'ai-generated'`.
+ *   3. Honour the user's stored dietary preferences + allergies unless
+ *      the caller overrides them.
+ */
+export const generateRecipe = asyncHandler<unknown, unknown, GenerateRecipeInput>(
+  async (req, res) => {
+    if (!req.user) throw AppError.unauthorized();
+    const { query, dietaryPreferences, allergies } = req.body;
+
+    // Pull stored prefs/allergies if the client didn't supply them.
+    let dietary = dietaryPreferences;
+    let allergyList = allergies;
+    if (!dietary || !allergyList) {
+      const user = await User.findById(req.user.sub).select('dietaryPreferences allergies').lean();
+      if (!dietary) dietary = user?.dietaryPreferences ?? [];
+      if (!allergyList) allergyList = user?.allergies ?? [];
+    }
+
+    const { result, usedQuery } = await generateRecipeWithRetry(query, {
+      dietary_preferences: dietary,
+      allergies: allergyList,
+    });
+
+    if (!result.success || !result.recipe) {
+      throw AppError.badGateway(
+        result.message ||
+          'The AI couldn\'t generate that recipe right now. Try a more specific name.'
+      );
+    }
+
+    const saved = await saveGeneratedRecipe(req.user.sub, result.recipe);
+    if (!saved) {
+      throw AppError.badGateway('Generated recipe failed validation — please try a different name.');
+    }
+
+    res.status(201).json({
+      success: true,
+      recipe: saved,
+      usedQuery,
+      generated: true,
+    });
   }
 );
 

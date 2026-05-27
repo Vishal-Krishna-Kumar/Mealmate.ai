@@ -5,6 +5,7 @@ import {
   createRecipe,
   updateRecipe,
   deleteRecipe,
+  generateRecipe,
 } from '../controllers/recipeController';
 import { validate } from '../middleware/validate';
 import { protect } from '../middleware/authMiddleware';
@@ -13,11 +14,13 @@ import {
   updateRecipeSchema,
   listRecipesQuerySchema,
   recipeIdParamSchema,
+  generateRecipeSchema,
 } from '../validators/recipeSchemas';
 
 const router = Router();
 
 router.get('/', validate({ query: listRecipesQuerySchema }), listRecipes);
+router.post('/generate', protect, validate({ body: generateRecipeSchema }), generateRecipe);
 router.get('/:id', validate({ params: recipeIdParamSchema }), getRecipe);
 router.post('/', protect, validate({ body: createRecipeSchema }), createRecipe);
 router.patch(

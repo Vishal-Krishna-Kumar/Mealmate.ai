@@ -1,3 +1,4 @@
+import { useState } from 'react';
 import { Link } from 'react-router-dom';
 import type { Recipe } from '@/types';
 import { cn } from '@/lib/cn';
@@ -15,6 +16,11 @@ const difficultyColors: Record<string, string> = {
 
 export function RecipeCard({ recipe, className }: RecipeCardProps) {
   const total = (recipe.prepTime ?? 0) + (recipe.cookTime ?? 0);
+  // Track whether the image successfully loaded so we can fall back to the
+  // emoji placeholder if the URL 404s, gets blocked by a network policy, or
+  // is returned but isn't actually an image (Wikipedia/Pollinations edge cases).
+  const [imageOk, setImageOk] = useState(true);
+  const showImage = Boolean(recipe.imageUrl) && imageOk;
   return (
     <Link
       to={`/recipes/${recipe.id}`}
@@ -25,12 +31,13 @@ export function RecipeCard({ recipe, className }: RecipeCardProps) {
       )}
     >
       <div className="aspect-[16/10] w-full overflow-hidden bg-gradient-to-br from-brand-50 to-emerald-100">
-        {recipe.imageUrl ? (
+        {showImage ? (
           <img
             src={recipe.imageUrl}
             alt={recipe.title}
             className="h-full w-full object-cover transition-transform group-hover:scale-105"
             loading="lazy"
+            onError={() => setImageOk(false)}
           />
         ) : (
           <div className="flex h-full items-center justify-center text-5xl">🍽️</div>

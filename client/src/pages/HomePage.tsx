@@ -108,7 +108,7 @@ export function HomePage() {
           eat more thoughtfully, waste less, and enjoy the kitchen again.”
         </blockquote>
         <p className="mt-4 text-xs uppercase tracking-[0.18em] text-ink-mute">
-          Team T03 · City University of Hong Kong
+          Team T03 · City University of Seattle
         </p>
       </section>
     </div>
