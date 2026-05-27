@@ -1,0 +1,51 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    color-scheme: light;
+  }
+
+  html,
+  body {
+    font-family: 'Inter', system-ui, sans-serif;
+    font-feature-settings: 'ss01', 'cv11';
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    background-color: #f5efe6;
+    color: #2a2723;
+  }
+
+  /* Editorial serif for all major headings. Individual components can
+     opt-out with `font-sans`. */
+  h1,
+  h2,
+  h3 {
+    font-family: 'Fraunces', 'Source Serif 4', Georgia, serif;
+    font-feature-settings: 'ss01';
+    letter-spacing: -0.01em;
+  }
+
+  h1 {
+    font-weight: 600;
+  }
+
+  /* Subtle, calm selection */
+  ::selection {
+    background-color: #f4ddd0;
+    color: #4f261a;
+  }
+}
+
+@layer components {
+  /* Reusable "card" surface tuned for the cream canvas. */
+  .mm-card {
+    @apply rounded-2xl border border-line bg-card shadow-soft;
+  }
+
+  /* Editorial accent eyebrow used on hero / section headers. */
+  .mm-eyebrow {
+    @apply text-xs font-medium uppercase tracking-[0.18em] text-brand-700;
+  }
+}

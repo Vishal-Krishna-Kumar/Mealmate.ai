@@ -1,0 +1,64 @@
+# Dependencies
+node_modules/
+client/node_modules/
+server/node_modules/
+
+# Environment
+.env
+.env.local
+.env.*.local
+*.env
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+venv/
+.venv/
+env/
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# ML artifacts
+*.pkl
+*.joblib
+*.h5
+*.onnx
+ai-service/models/*.pkl
+ai-service/data/*.csv
+!ai-service/data/.gitkeep
+
+# Build outputs
+client/build/
+client/dist/
+server/dist/
+*.tsbuildinfo
+
+# Logs
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Coverage
+coverage/
+.nyc_output/
+htmlcov/
+.coverage
+
+# Editors / OS
+.vscode/*
+!.vscode/settings.json
+!.vscode/extensions.json
+.idea/
+.DS_Store
+Thumbs.db
+
+# Docker
+*.pid
+
+# Local persistent dev database (mongodb-memory-server with dbPath)
+server/.mongo-data/

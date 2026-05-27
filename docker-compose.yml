@@ -1,0 +1,68 @@
+# MealMate full-stack docker-compose for local development & demos.
+#
+# Brings up Mongo, the FastAPI AI microservice, the Express API and the
+# Vite-built React SPA behind nginx. The web UI is reachable on
+# http://localhost:8080 — nginx proxies /api/* to the server container.
+#
+# Usage:
+#   docker compose up --build
+#
+# Override secrets via a `.env` file at the repo root (compose reads it
+# automatically) or via the `MEALMATE_*` environment variables shown below.
+
+services:
+  mongo:
+    image: mongo:7
+    restart: unless-stopped
+    volumes:
+      - mongo_data:/data/db
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.runCommand({ ping: 1 }).ok"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  ai-service:
+    build:
+      context: ./ai-service
+    restart: unless-stopped
+    environment:
+      LOG_LEVEL: INFO
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/health').status==200 else 1)"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+
+  server:
+    build:
+      context: ./server
+    restart: unless-stopped
+    depends_on:
+      mongo:
+        condition: service_healthy
+      ai-service:
+        condition: service_started
+    environment:
+      NODE_ENV: production
+      PORT: "5000"
+      MONGO_URI: mongodb://mongo:27017/mealmate
+      JWT_SECRET: ${JWT_SECRET:-change-me-in-production}
+      JWT_EXPIRES_IN: ${JWT_EXPIRES_IN:-7d}
+      AI_SERVICE_URL: http://ai-service:8000
+      CORS_ORIGIN: ${CORS_ORIGIN:-http://localhost:8080}
+
+  client:
+    build:
+      context: ./client
+      args:
+        # Browsers hit nginx on the same origin, which proxies /api → server.
+        VITE_API_URL: /api
+    restart: unless-stopped
+    depends_on:
+      - server
+    ports:
+      - "8080:80"
+
+volumes:
+  mongo_data:

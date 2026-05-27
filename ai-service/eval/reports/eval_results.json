@@ -1,0 +1,40 @@
+{
+  "corpus_size": 64,
+  "top_k": 10,
+  "query_fraction": 0.3,
+  "seed": 42,
+  "results": {
+    "tfidf": {
+      "recall@5": 1.0,
+      "recall@10": 1.0,
+      "mrr": 0.9154,
+      "ndcg@10": 0.9372,
+      "median_latency_ms": 1.54,
+      "queries": 64.0
+    },
+    "lsa": {
+      "recall@5": 1.0,
+      "recall@10": 1.0,
+      "mrr": 0.9076,
+      "ndcg@10": 0.9314,
+      "median_latency_ms": 1.57,
+      "queries": 64.0
+    },
+    "collab": {
+      "recall@5": 0.1094,
+      "recall@10": 0.25,
+      "mrr": 0.0574,
+      "ndcg@10": 0.1006,
+      "median_latency_ms": 1.65,
+      "queries": 64.0
+    },
+    "hybrid": {
+      "recall@5": 1.0,
+      "recall@10": 1.0,
+      "mrr": 0.9154,
+      "ndcg@10": 0.9372,
+      "median_latency_ms": 1.73,
+      "queries": 64.0
+    }
+  }
+}
