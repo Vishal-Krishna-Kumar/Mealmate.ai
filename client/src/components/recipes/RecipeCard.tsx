@@ -21,6 +21,7 @@ export function RecipeCard({ recipe, className }: RecipeCardProps) {
   // is returned but isn't actually an image (Wikipedia/Pollinations edge cases).
   const [imageOk, setImageOk] = useState(true);
   const showImage = Boolean(recipe.imageUrl) && imageOk;
+  const isAiGenerated = recipe.source === 'ai-generated';
   return (
     <Link
       to={`/recipes/${recipe.id}`}
@@ -30,7 +31,7 @@ export function RecipeCard({ recipe, className }: RecipeCardProps) {
         className
       )}
     >
-      <div className="aspect-[16/10] w-full overflow-hidden bg-gradient-to-br from-brand-50 to-emerald-100">
+      <div className="relative aspect-[16/10] w-full overflow-hidden bg-gradient-to-br from-brand-50 to-emerald-100">
         {showImage ? (
           <img
             src={recipe.imageUrl}
@@ -41,6 +42,14 @@ export function RecipeCard({ recipe, className }: RecipeCardProps) {
           />
         ) : (
           <div className="flex h-full items-center justify-center text-5xl">🍽️</div>
+        )}
+        {isAiGenerated && (
+          <span
+            className="absolute left-2 top-2 inline-flex items-center gap-1 rounded-full bg-gradient-to-r from-brand-600 to-emerald-600 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-white shadow-sm"
+            title="Drafted by MealMate AI — fully editable"
+          >
+            ✨ AI-generated
+          </span>
         )}
       </div>
       <div className="flex flex-1 flex-col gap-2 p-4">

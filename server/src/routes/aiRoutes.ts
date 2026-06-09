@@ -225,10 +225,17 @@ router.post(
       // Apply any structured actions the assistant returned (e.g. add a
       // recipe to the user's weekly plan) and surface the resolved details
       // (calories, ingredients) so the client can render confirmation cards.
+      // We pass the user's last message so chatActions can fall back to
+      // parsing an explicit date (e.g. "june 4") if the LLM didn't fill
+      // target_date — this prevents the recipe from landing on the wrong
+      // week's Thursday when the LLM gets calendar math wrong.
+      const lastUserMessage =
+        [...body.messages].reverse().find((m) => m.role === 'user')?.content ?? '';
       const appliedActions = await applyChatActions(
         req.user.sub,
         { dietaryPreferences: prefs, allergies },
-        result.actions
+        result.actions,
+        lastUserMessage
       );
       res.json({ ...result, applied_actions: appliedActions });
     } catch {

@@ -205,6 +205,17 @@ class AddToPlanAction(BaseModel):
         le=8,
         description="0 = current week (Mon-Sun), 1 = next week, etc.",
     )
+    target_date: str | None = Field(
+        default=None,
+        pattern=r"^\d{4}-\d{2}-\d{2}$",
+        description=(
+            "Optional ISO date (YYYY-MM-DD) when the user named an explicit "
+            "calendar date (e.g. 'june 4', '5/30', '2026-06-04'). When "
+            "present, the server derives the correct (day, week_offset) from "
+            "this date and ignores the fields above \u2014 this prevents off-by-one-week "
+            "errors when 'this Thursday' vs 'next Thursday' is ambiguous."
+        ),
+    )
 
 
 # Discriminated union — new action types can be added here without breaking

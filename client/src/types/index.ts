@@ -60,6 +60,9 @@ export interface Recipe {
   difficulty: Difficulty;
   nutrition?: Nutrition;
   imageUrl?: string;
+  /** Provenance: 'seed' for bundled recipes, 'user' for ones you authored,
+   *  'ai-generated' for recipes drafted by the AI chat / planner picker. */
+  source?: string;
   createdBy?: string;
   createdAt?: string;
   updatedAt?: string;

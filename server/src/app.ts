@@ -1,4 +1,5 @@
 import express, { type Express, type Request, type Response } from 'express';
+import path from 'node:path';
 import cors from 'cors';
 import helmet from 'helmet';
 import compression from 'compression';
@@ -32,6 +33,9 @@ export function createApp(): Express {
   if (env.NODE_ENV !== 'test') {
     app.use(metricsMiddleware());
   }
+
+  // Serve cached recipe images and other static assets.
+  app.use('/static', express.static(path.resolve(__dirname, '..', 'static')));
 
   // Logging (skip during tests)
   if (env.NODE_ENV !== 'test') {

@@ -55,6 +55,7 @@ export function useAssignSlot() {
     onSuccess: (plan) => {
       qc.setQueryData(['mealplan', plan.id], plan);
       qc.invalidateQueries({ queryKey: ['mealplans'] });
+      qc.invalidateQueries({ queryKey: ['mealplan', plan.id] });
     },
   });
 }

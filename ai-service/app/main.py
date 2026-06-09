@@ -195,6 +195,31 @@ def create_app() -> FastAPI:
     def generate_recipe(payload: GenerateRecipeRequest) -> GenerateRecipeResponse:
         return recipe_gen.generate(payload)
 
+    @app.post(
+        "/recipes/refresh-image",
+        tags=["assistant"],
+        summary="Recompute an image URL for an existing recipe title (backfill use).",
+    )
+    def refresh_image(payload: dict) -> dict:  # type: ignore[type-arg]
+        """Lightweight helper the server's backfill script calls to fix bad
+        images on previously-generated recipes. Body: {title, cuisine?, ingredients?}.
+        Returns {image_url: str | None}.
+        """
+        title = str(payload.get("title") or "").strip()
+        cuisine = payload.get("cuisine")
+        ingredients = payload.get("ingredients") or []
+        if not title:
+            return {"image_url": None}
+        url = (
+            recipe_gen._fetch_wikipedia_image(title)
+            or recipe_gen._pollinations_image_url(
+                title,
+                cuisine=cuisine if isinstance(cuisine, str) else None,
+                ingredients=[str(i) for i in ingredients if i],
+            )
+        )
+        return {"image_url": url}
+
     @app.post("/pantry/parse", response_model=PantryParseResponse, tags=["assistant"])
     def parse_pantry(payload: PantryParseRequest) -> PantryParseResponse:
         return pantry_parser.parse(payload)

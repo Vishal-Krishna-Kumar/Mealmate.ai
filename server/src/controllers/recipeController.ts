@@ -105,7 +105,7 @@ export const generateRecipe = asyncHandler<unknown, unknown, GenerateRecipeInput
       );
     }
 
-    const saved = await saveGeneratedRecipe(req.user.sub, result.recipe);
+    const saved = await saveGeneratedRecipe(req.user.sub, result.recipe, query);
     if (!saved) {
       throw AppError.badGateway('Generated recipe failed validation — please try a different name.');
     }

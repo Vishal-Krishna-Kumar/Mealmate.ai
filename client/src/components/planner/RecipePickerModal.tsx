@@ -50,9 +50,8 @@ export function RecipePickerModal({ open, title, onClose, onPick }: RecipePicker
   if (!open) return null;
 
   const trimmedSearch = debounced.trim();
-  const noResults =
-    !isLoading && data !== undefined && data.items.length === 0;
-  const canGenerate = noResults && trimmedSearch.length >= 3;
+  const noResults = !isLoading && data !== undefined && data.items.length === 0;
+  const canGenerate = trimmedSearch.length >= 3;
 
   async function handleGenerate() {
     if (!canGenerate || generate.isPending) return;
@@ -128,44 +127,50 @@ export function RecipePickerModal({ open, title, onClose, onPick }: RecipePicker
                 </span>
                 .
               </p>
-              {canGenerate ? (
-                <>
-                  <p className="text-xs text-gray-500">
-                    MealMate AI can draft one for you using web knowledge and add it
-                    straight to this slot — works for any cuisine or dish, even ones
-                    we don&rsquo;t stock yet.
-                  </p>
-                  <button
-                    type="button"
-                    onClick={handleGenerate}
-                    disabled={generate.isPending}
-                    className="flex w-full items-center justify-center gap-2 rounded-lg bg-gradient-to-r from-brand-600 to-emerald-600 px-4 py-2 text-sm font-semibold text-white shadow-sm transition hover:from-brand-700 hover:to-emerald-700 disabled:cursor-not-allowed disabled:opacity-60"
-                  >
-                    {generate.isPending ? (
-                      <>
-                        <span className="inline-block h-3 w-3 animate-spin rounded-full border-2 border-white border-t-transparent" />
-                        Generating…
-                      </>
-                    ) : (
-                      <>
-                        <span aria-hidden>✨</span>
-                        Generate &ldquo;{trimmedSearch}&rdquo; with AI
-                      </>
-                    )}
-                  </button>
-                  {genError && (
-                    <p className="rounded-md bg-red-50 px-2 py-1.5 text-xs text-red-700">
-                      {genError}
-                    </p>
-                  )}
-                </>
-              ) : (
-                <p className="text-xs text-gray-400">
-                  Type at least 3 characters to generate with AI.
-                </p>
-              )}
+              <p className="text-xs text-gray-500">
+                MealMate AI can draft one for you using your exact query and add it
+                straight to this slot — including ingredients, instructions, and
+                an image if available.
+              </p>
             </li>
           )}
+          <li className="space-y-3 p-3 text-sm">
+            {canGenerate ? (
+              <>
+                <p className="text-gray-600">
+                  Can’t find the perfect match? Generate a new recipe based on{' '}
+                  <span className="font-medium text-gray-900">{trimmedSearch || search}</span>.
+                </p>
+                <button
+                  type="button"
+                  onClick={handleGenerate}
+                  disabled={generate.isPending}
+                  className="flex w-full items-center justify-center gap-2 rounded-lg bg-gradient-to-r from-brand-600 to-emerald-600 px-4 py-2 text-sm font-semibold text-white shadow-sm transition hover:from-brand-700 hover:to-emerald-700 disabled:cursor-not-allowed disabled:opacity-60"
+                >
+                  {generate.isPending ? (
+                    <>
+                      <span className="inline-block h-3 w-3 animate-spin rounded-full border-2 border-white border-t-transparent" />
+                      Generating…
+                    </>
+                  ) : (
+                    <>
+                      <span aria-hidden>✨</span>
+                      Generate &ldquo;{trimmedSearch || search}&rdquo; with AI
+                    </>
+                  )}
+                </button>
+                {genError && (
+                  <p className="rounded-md bg-red-50 px-2 py-1.5 text-xs text-red-700">
+                    {genError}
+                  </p>
+                )}
+              </>
+            ) : (
+              <p className="text-xs text-gray-400">
+                Type at least 3 characters to generate with AI.
+              </p>
+            )}
+          </li>
         </ul>
 
         <div className="mt-3 flex justify-end">

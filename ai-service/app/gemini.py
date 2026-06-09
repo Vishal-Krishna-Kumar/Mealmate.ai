@@ -14,6 +14,7 @@ memoised in a TTL-LRU cache (see :py:mod:`app.cache` and :py:mod:`app.metrics`).
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 from typing import Any
@@ -22,6 +23,48 @@ from .cache import get_cache, make_key
 from .metrics import record_llm_call
 
 DEFAULT_MODEL = "gemini-2.5-flash"
+
+_logger = logging.getLogger(__name__)
+
+
+class GeminiQuotaError(RuntimeError):
+    """Raised when the Gemini API rejects a call with HTTP 429 (quota / rate-limit).
+
+    Carries the model name and a retry-after hint (seconds) parsed from the
+    SDK's ``ResourceExhausted`` exception so the caller can surface an
+    accurate message to the end-user instead of generic "try rephrasing"
+    advice (which is misleading when the real cause is a hard quota cap).
+    """
+
+    def __init__(self, message: str, *, model: str, retry_after: int | None = None) -> None:
+        super().__init__(message)
+        self.model = model
+        self.retry_after = retry_after
+
+
+def _maybe_quota_error(exc: BaseException, model: str) -> GeminiQuotaError | None:
+    """Detect a 429 / ResourceExhausted from the Gemini SDK and convert it.
+
+    The SDK exposes the error as ``google.api_core.exceptions.ResourceExhausted``
+    on most installs; on older builds it's a plain string message containing
+    ``429``. We sniff both shapes and extract the ``retry_delay { seconds: N }``
+    block when present so the UI can show a precise countdown.
+    """
+    name = type(exc).__name__
+    msg = str(exc)
+    is_quota = name == "ResourceExhausted" or "429" in msg or "quota" in msg.lower()
+    if not is_quota:
+        return None
+    retry_after: int | None = None
+    # Look for ``seconds: 25`` inside the retry_delay block the SDK serialises.
+    match = re.search(r"retry_delay\s*\{\s*seconds:\s*(\d+)", msg)
+    if match:
+        retry_after = int(match.group(1))
+    else:
+        match = re.search(r"retry[_ ]?after[^\d]*(\d+)", msg, re.IGNORECASE)
+        if match:
+            retry_after = int(match.group(1))
+    return GeminiQuotaError(msg.split("\n", 1)[0], model=model, retry_after=retry_after)
 
 
 def is_available() -> bool:
@@ -79,7 +122,21 @@ def generate_text(
         if json_mode:
             config["response_mime_type"] = "application/json"
         resp = model.generate_content(user, generation_config=config)
-    except Exception:  # pragma: no cover - network path
+    except Exception as exc:  # pragma: no cover - network path
+        quota = _maybe_quota_error(exc, _model_name())
+        if quota is not None:
+            _logger.warning(
+                "gemini.generate_text quota exceeded (retry_after=%ss): %s",
+                quota.retry_after,
+                quota,
+            )
+            record_llm_call("text", "quota_exceeded")
+            raise quota from exc
+        _logger.warning(
+            "gemini.generate_text failed: %s: %s",
+            type(exc).__name__,
+            exc,
+        )
         record_llm_call("text", "api_error")
         return None
     text = getattr(resp, "text", None)
@@ -140,7 +197,26 @@ def generate_chat(
         if json_mode:
             config["response_mime_type"] = "application/json"
         resp = chat.send_message(user_message, generation_config=config)
-    except Exception:  # pragma: no cover - network path
+    except Exception as exc:  # pragma: no cover - network path
+        # Surface quota errors distinctly so the UI can show a precise
+        # "daily limit hit, retry in N s" message instead of misleading
+        # "try rephrasing" advice that doesn't apply.
+        quota = _maybe_quota_error(exc, _model_name())
+        if quota is not None:
+            _logger.warning(
+                "gemini.generate_chat quota exceeded (retry_after=%ss): %s",
+                quota.retry_after,
+                quota,
+            )
+            record_llm_call("chat", "quota_exceeded")
+            raise quota from exc
+        # Log the underlying SDK error so we can actually diagnose chat
+        # failures instead of seeing a silent "api_error" counter bump.
+        _logger.warning(
+            "gemini.generate_chat failed: %s: %s",
+            type(exc).__name__,
+            exc,
+        )
         record_llm_call("chat", "api_error")
         return None
     # `resp.text` is a convenience accessor that raises when the response has

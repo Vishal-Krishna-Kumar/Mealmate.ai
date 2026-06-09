@@ -104,13 +104,18 @@ export const assignSlot = asyncHandler<{ id: string }, unknown, AssignSlotInput>
     else dayDoc.dinner = value;
 
     await plan.save();
+    const populatedPlan = await MealPlan.findById(plan._id).populate(
+      'days.breakfast days.lunch days.dinner days.snacks',
+      'title slug imageUrl prepTime cookTime nutrition ingredients servings'
+    );
+
     broadcastMealPlan({
       type: 'mealplan:updated',
       mealPlanId: String(plan._id),
-      payload: plan,
+      payload: populatedPlan ?? plan,
       actorId: req.user.sub,
     });
-    res.json({ success: true, plan });
+    res.json({ success: true, plan: populatedPlan ?? plan });
   }
 );
 

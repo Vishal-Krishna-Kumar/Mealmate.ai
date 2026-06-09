@@ -89,7 +89,8 @@ describe('Meal plan + grocery + nutrition flow', () => {
       .send({ day: 'Monday', slot: 'dinner', recipeId });
     expect(assign.status).toBe(200);
     const monday = assign.body.plan.days.find((d: { day: string }) => d.day === 'Monday');
-    expect(String(monday.dinner)).toBe(recipeId);
+    expect(monday.dinner.id).toBe(recipeId);
+    expect(monday.dinner.title).toBe('Chicken Stir Fry');
   });
 
   it('generates a grocery list from a meal plan', async () => {

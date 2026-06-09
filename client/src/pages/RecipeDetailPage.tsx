@@ -1,3 +1,4 @@
+import { useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import { Button } from '@/components/ui/Button';
 import { useDeleteRecipe, useRecipe } from '@/hooks/useRecipes';
@@ -12,6 +13,7 @@ export function RecipeDetailPage() {
   const user = useAuthStore((s) => s.user);
   const { data: recipe, isLoading, isError, error } = useRecipe(id);
   const del = useDeleteRecipe();
+  const [imageOk, setImageOk] = useState(true);
 
   if (isLoading) {
     return (
@@ -39,6 +41,7 @@ export function RecipeDetailPage() {
   const isOwner =
     user && recipe.createdBy && (String(recipe.createdBy) === user.id || user.role === 'admin');
   const total = (recipe.prepTime ?? 0) + (recipe.cookTime ?? 0);
+  const showImage = Boolean(recipe.imageUrl) && imageOk;
 
   async function handleDelete() {
     if (!recipe) return;
@@ -77,6 +80,21 @@ export function RecipeDetailPage() {
           </div>
         )}
       </header>
+
+      <div className="overflow-hidden rounded-3xl bg-gray-100">
+        {showImage ? (
+          <img
+            src={recipe.imageUrl}
+            alt={recipe.title}
+            className="h-[360px] w-full object-cover"
+            onError={() => setImageOk(false)}
+          />
+        ) : (
+          <div className="flex h-[360px] items-center justify-center text-5xl text-gray-400">
+            🍽️
+          </div>
+        )}
+      </div>
 
       <div className="flex flex-wrap gap-3 text-sm text-gray-600">
         <span className="rounded-md bg-gray-100 px-3 py-1">⏱️ Prep {recipe.prepTime} min</span>

@@ -21,6 +21,7 @@ import { Recipe, type IRecipe, type IRecipeIngredient } from '../models/Recipe';
 import { GroceryList } from '../models/GroceryList';
 import { aggregateGroceryItems, collectRecipesFromPlan } from '../utils/groceryAggregator';
 import { broadcastMealPlan } from './realtime';
+import { cacheOrPassthrough } from './imageCache';
 import { generateRecipe, type GeneratedRecipe } from './aiClient';
 import { logger } from '../config/logger';
 
@@ -34,6 +35,11 @@ export interface RawAction {
   day?: string;
   slot?: string;
   week_offset?: number;
+  /** Optional ISO date the AI extracted from an explicit phrase like
+   *  'june 4' or 'tomorrow'. When present we derive (day, weekOffset)
+   *  from this and ignore the AI's day / week_offset choices (those are
+   *  best-effort — LLMs are bad at calendar math). */
+  target_date?: string;
 }
 
 export interface AppliedAction {
@@ -79,6 +85,152 @@ function targetWeekStart(weekOffset: number): Date {
   const monday = mondayOfWeek(new Date());
   monday.setUTCDate(monday.getUTCDate() + weekOffset * 7);
   return monday;
+}
+
+/** Day-of-week names indexed by JS getUTCDay() (0 = Sunday). */
+const JS_DAY_NAMES: DayOfWeek[] = [
+  'Sunday',
+  'Monday',
+  'Tuesday',
+  'Wednesday',
+  'Thursday',
+  'Friday',
+  'Saturday',
+];
+
+const MONTH_INDEX: Record<string, number> = {
+  jan: 0, january: 0,
+  feb: 1, february: 1,
+  mar: 2, march: 2,
+  apr: 3, april: 3,
+  may: 4,
+  jun: 5, june: 5,
+  jul: 6, july: 6,
+  aug: 7, august: 7,
+  sep: 8, sept: 8, september: 8,
+  oct: 9, october: 9,
+  nov: 10, november: 10,
+  dec: 11, december: 11,
+};
+
+/**
+ * Best-effort: pull an explicit calendar date out of a free-text user
+ * message. Recognises common patterns we see in chat:
+ *   - "june 4", "jun 4th", "4 june"
+ *   - "6/4", "06/04/2026", "6-4"
+ *   - "2026-06-04"
+ *   - "today", "tomorrow", "day after tomorrow"
+ *
+ * Returns a UTC Date (midnight) or `null` if nothing matched. When a year
+ * isn't given we resolve to the NEXT occurrence (i.e. this year if still in
+ * the future, otherwise next year) so "add salmon on dec 1" said in late
+ * November doesn't fly off to last December.
+ */
+function parseExplicitDate(text: string, now: Date = new Date()): Date | null {
+  if (!text) return null;
+  const lower = text.toLowerCase();
+  const todayUtc = new Date(
+    Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate())
+  );
+
+  // Relative day words.
+  if (/\btoday\b/.test(lower)) return todayUtc;
+  if (/\btomorrow\b/.test(lower)) {
+    const d = new Date(todayUtc);
+    d.setUTCDate(d.getUTCDate() + 1);
+    return d;
+  }
+  if (/\bday\s+after\s+tomorrow\b/.test(lower)) {
+    const d = new Date(todayUtc);
+    d.setUTCDate(d.getUTCDate() + 2);
+    return d;
+  }
+
+  // ISO YYYY-MM-DD.
+  const iso = lower.match(/\b(20\d{2})-(\d{1,2})-(\d{1,2})\b/);
+  if (iso) {
+    const y = Number(iso[1]);
+    const m = Number(iso[2]);
+    const d = Number(iso[3]);
+    if (m >= 1 && m <= 12 && d >= 1 && d <= 31) {
+      return new Date(Date.UTC(y, m - 1, d));
+    }
+  }
+
+  // Month-name patterns: "june 4", "jun 4th", "4 june", "june 4 2026".
+  const monthDay = lower.match(
+    /\b(jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sept?(?:ember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\s+(\d{1,2})(?:st|nd|rd|th)?(?:[,\s]+(20\d{2}))?\b/
+  );
+  const dayMonth = lower.match(
+    /\b(\d{1,2})(?:st|nd|rd|th)?\s+(jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sept?(?:ember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)(?:[,\s]+(20\d{2}))?\b/
+  );
+  const monthName = monthDay?.[1] ?? dayMonth?.[2];
+  const dayNum = Number(monthDay?.[2] ?? dayMonth?.[1] ?? 0);
+  const yearRaw = monthDay?.[3] ?? dayMonth?.[3];
+  if (monthName && dayNum >= 1 && dayNum <= 31) {
+    const monthIdx = MONTH_INDEX[monthName];
+    if (monthIdx !== undefined) {
+      let year = yearRaw ? Number(yearRaw) : now.getUTCFullYear();
+      let candidate = new Date(Date.UTC(year, monthIdx, dayNum));
+      // No year given and the date has already passed by more than 1 day
+      // → assume next year. (1-day grace so "today" said near midnight
+      // doesn't bump.)
+      if (!yearRaw) {
+        const oneDayMs = 24 * 60 * 60 * 1000;
+        if (candidate.getTime() < todayUtc.getTime() - oneDayMs) {
+          year += 1;
+          candidate = new Date(Date.UTC(year, monthIdx, dayNum));
+        }
+      }
+      return candidate;
+    }
+  }
+
+  // Numeric M/D or M/D/YYYY (or with dashes). Skip if it looks like a
+  // ratio / fraction context by requiring word boundaries.
+  const mdy = lower.match(/\b(\d{1,2})[\/\-](\d{1,2})(?:[\/\-](20\d{2}))?\b/);
+  if (mdy) {
+    const m = Number(mdy[1]);
+    const d = Number(mdy[2]);
+    const y = mdy[3] ? Number(mdy[3]) : now.getUTCFullYear();
+    if (m >= 1 && m <= 12 && d >= 1 && d <= 31) {
+      let candidate = new Date(Date.UTC(y, m - 1, d));
+      if (!mdy[3]) {
+        const oneDayMs = 24 * 60 * 60 * 1000;
+        if (candidate.getTime() < todayUtc.getTime() - oneDayMs) {
+          candidate = new Date(Date.UTC(y + 1, m - 1, d));
+        }
+      }
+      return candidate;
+    }
+  }
+
+  return null;
+}
+
+/**
+ * Given an explicit target Date, derive the (day, weekOffset, weekStartDate)
+ * triple the rest of the pipeline uses. weekOffset is the number of full
+ * Mon-Sun weeks between today's week and the target's week.
+ */
+function resolveDateToSlot(target: Date): {
+  day: DayOfWeek;
+  weekOffset: number;
+  weekStartDate: Date;
+} {
+  const targetMonday = mondayOfWeek(target);
+  const todayMonday = mondayOfWeek(new Date());
+  const diffDays = Math.round(
+    (targetMonday.getTime() - todayMonday.getTime()) / (24 * 60 * 60 * 1000)
+  );
+  const weekOffset = Math.max(0, Math.round(diffDays / 7));
+  const day = JS_DAY_NAMES[target.getUTCDay()] as DayOfWeek;
+  // Recompute weekStartDate from the clamped weekOffset so we never write a
+  // past Monday into MongoDB even if the user asked for a date that's in the
+  // past (we just place it in the current week instead).
+  const weekStartDate = new Date(todayMonday);
+  weekStartDate.setUTCDate(weekStartDate.getUTCDate() + weekOffset * 7);
+  return { day, weekOffset, weekStartDate };
 }
 
 function slugifyQuery(text: string): string {
@@ -136,7 +288,7 @@ function significantTokens(query: string): string[] {
 }
 
 /** Find a recipe matching the LLM-provided query, with several fallbacks. */
-async function resolveRecipe(query: string): Promise<IRecipe & { _id: Types.ObjectId } | null> {
+export async function resolveRecipe(query: string): Promise<IRecipe & { _id: Types.ObjectId } | null> {
   const trimmed = query.trim();
   if (!trimmed) return null;
   const slug = slugifyQuery(trimmed);
@@ -214,8 +366,13 @@ function isSlot(value: unknown): value is Slot {
  */
 export async function saveGeneratedRecipe(
   userId: string,
-  gen: GeneratedRecipe
+  gen: GeneratedRecipe,
+  preferredTitle?: string
 ): Promise<(IRecipe & { _id: Types.ObjectId }) | null> {
+  if (preferredTitle) {
+    normalizeGeneratedRecipeTitle(gen, preferredTitle);
+  }
+
   if (!gen.title?.trim() || !gen.ingredients?.length || !gen.instructions?.length) {
     return null;
   }
@@ -227,6 +384,7 @@ export async function saveGeneratedRecipe(
     const existing = await Recipe.findOne({ slug });
     if (existing) return existing as IRecipe & { _id: Types.ObjectId };
 
+    const imageUrl = await cacheOrPassthrough(gen.image_url ?? null);
     const doc = await Recipe.create({
       title: gen.title.trim().slice(0, 200),
       slug,
@@ -251,7 +409,7 @@ export async function saveGeneratedRecipe(
         sugar: gen.nutrition?.sugar ?? undefined,
         sodium: gen.nutrition?.sodium ?? undefined,
       },
-      imageUrl: gen.image_url ?? undefined,
+      imageUrl: imageUrl ?? undefined,
       source: gen.source ?? 'ai-generated',
       difficulty: gen.difficulty ?? 'medium',
       createdBy: new Types.ObjectId(userId),
@@ -326,6 +484,27 @@ async function upsertGroceryListForPlan(
  * Returns the simplified query (different from the original) or null if no
  * useful simplification could be derived.
  */
+function normalizeGeneratedRecipeTitle(gen: GeneratedRecipe, query: string): GeneratedRecipe {
+  const requested = String(query).trim();
+  if (!requested) return gen;
+
+  const rawTitle = String(gen.title ?? '').trim();
+  if (!rawTitle) return gen;
+
+  const normalize = (text: string) => text.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+  const normalizedTitle = normalize(rawTitle);
+  const normalizedQuery = normalize(requested);
+
+  if (normalizedTitle.includes(normalizedQuery) || normalizedQuery.includes(normalizedTitle)) {
+    return gen;
+  }
+
+  gen.title = requested
+    .replace(/\s+/g, ' ')
+    .replace(/\b\w/g, (match) => match.toUpperCase());
+  return gen;
+}
+
 function simplifyCompoundQuery(query: string): string | null {
   const trimmed = query.trim();
   if (!trimmed) return null;
@@ -377,23 +556,64 @@ export async function generateRecipeWithRetry(
 async function applyAddToPlan(
   userId: string,
   ctx: ChatActionContext,
-  raw: RawAction
+  raw: RawAction,
+  userMessage?: string
 ): Promise<AppliedAction> {
   const recipeQuery = String(raw.recipe_query ?? '').trim();
   const dayRaw = String(raw.day ?? '');
   const slotRaw = String(raw.slot ?? '').toLowerCase();
-  const weekOffset = Number.isFinite(raw.week_offset)
+  const aiWeekOffset = Number.isFinite(raw.week_offset)
     ? Math.max(0, Math.min(8, Math.trunc(raw.week_offset as number)))
     : 0;
 
+  // ---- Date resolution ---------------------------------------------------
+  // Source-of-truth priority for which calendar slot we're writing to:
+  //   1. AI's explicit target_date (e.g. '2026-06-04') — we trust this when
+  //      provided because the AI was told to compute it deterministically.
+  //   2. A date phrase parsed directly from the user's last message ('june
+  //      4', 'tomorrow', '6/4'). Defends against LLM date-math mistakes.
+  //   3. Fall back to whatever (day, week_offset) the AI returned.
+  // This three-tier scheme is why "june 4" no longer lands on "this
+  // Thursday May 28" — the explicit date wins over the model's guess.
+  let resolvedDay: DayOfWeek | string = dayRaw;
+  let resolvedWeekOffset = aiWeekOffset;
+  let resolvedWeekStart: Date | null = null;
+
+  const aiTarget =
+    typeof raw.target_date === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(raw.target_date)
+      ? new Date(`${raw.target_date}T00:00:00Z`)
+      : null;
+  const messageTarget = userMessage ? parseExplicitDate(userMessage) : null;
+  const explicitTarget =
+    aiTarget && !Number.isNaN(aiTarget.getTime()) ? aiTarget : messageTarget;
+
+  if (explicitTarget) {
+    const resolved = resolveDateToSlot(explicitTarget);
+    resolvedDay = resolved.day;
+    resolvedWeekOffset = resolved.weekOffset;
+    resolvedWeekStart = resolved.weekStartDate;
+    logger.info(
+      {
+        recipeQuery,
+        source: aiTarget ? 'ai_target_date' : 'parsed_user_message',
+        targetDate: explicitTarget.toISOString().slice(0, 10),
+        resolvedDay,
+        resolvedWeekOffset,
+        aiDay: dayRaw,
+        aiWeekOffset,
+      },
+      'chatActions: resolved explicit date — overriding AI day/week_offset'
+    );
+  }
+
   const requested = {
     recipe_query: recipeQuery,
-    day: dayRaw,
+    day: resolvedDay,
     slot: slotRaw,
-    week_offset: weekOffset,
+    week_offset: resolvedWeekOffset,
   };
 
-  if (!recipeQuery || !isDay(dayRaw) || !isSlot(slotRaw)) {
+  if (!recipeQuery || !isDay(resolvedDay) || !isSlot(slotRaw)) {
     return {
       type: 'add_to_plan',
       status: 'invalid',
@@ -416,7 +636,7 @@ async function applyAddToPlan(
         allergies: ctx.allergies,
       });
       if (gen.success && gen.recipe) {
-        const saved = await saveGeneratedRecipe(userId, gen.recipe);
+        const saved = await saveGeneratedRecipe(userId, gen.recipe, recipeQuery);
         if (saved) {
           recipe = saved;
           wasGenerated = true;
@@ -442,7 +662,7 @@ async function applyAddToPlan(
   }
 
   try {
-    const weekStartDate = targetWeekStart(weekOffset);
+    const weekStartDate = resolvedWeekStart ?? targetWeekStart(resolvedWeekOffset);
     const defaultDays: IDayPlan[] = DAYS_OF_WEEK.map((d) => ({
       day: d,
       snacks: [] as Types.ObjectId[],
@@ -454,9 +674,9 @@ async function applyAddToPlan(
       { upsert: true, new: true, setDefaultsOnInsert: true }
     );
 
-    let dayDoc = plan.days.find((d) => d.day === dayRaw);
+    let dayDoc = plan.days.find((d) => d.day === resolvedDay);
     if (!dayDoc) {
-      dayDoc = { day: dayRaw, snacks: [] } as IDayPlan;
+      dayDoc = { day: resolvedDay as DayOfWeek, snacks: [] } as IDayPlan;
       plan.days.push(dayDoc);
     }
     if (slotRaw === 'breakfast') dayDoc.breakfast = recipe._id;
@@ -501,8 +721,8 @@ async function applyAddToPlan(
       mealPlanId: String(plan._id),
       weekStartDate: weekStartDate.toISOString(),
       message: wasGenerated
-        ? `Generated "${recipe.title}" and added it to ${dayRaw} ${slotRaw}.`
-        : `Added "${recipe.title}" to ${dayRaw} ${slotRaw}.`,
+        ? `Generated "${recipe.title}" and added it to ${resolvedDay} ${slotRaw}.`
+        : `Added "${recipe.title}" to ${resolvedDay} ${slotRaw}.`,
     };
   } catch (err) {
     logger.error({ err }, 'chatActions: failed to apply add_to_plan');
@@ -519,18 +739,23 @@ async function applyAddToPlan(
  * Apply each action from the AI service. Unknown action types are silently
  * skipped (forward-compatible). Failures are reported per-action rather than
  * thrown so the chat reply itself always succeeds.
+ *
+ * @param userMessage  The user's last chat message (raw). Used as a safety
+ *   net for date parsing — if the AI didn't fill `target_date` but the user
+ *   typed something like "june 4", we still resolve to the right week.
  */
 export async function applyChatActions(
   userId: string,
   ctx: ChatActionContext,
-  actions: RawAction[] | undefined
+  actions: RawAction[] | undefined,
+  userMessage?: string
 ): Promise<AppliedAction[]> {
   if (!Array.isArray(actions) || actions.length === 0) return [];
   const out: AppliedAction[] = [];
   // Cap so a misbehaving model can't queue up dozens of writes.
   for (const raw of actions.slice(0, 4)) {
     if (raw && raw.type === 'add_to_plan') {
-      out.push(await applyAddToPlan(userId, ctx, raw));
+      out.push(await applyAddToPlan(userId, ctx, raw, userMessage));
     }
   }
   return out;

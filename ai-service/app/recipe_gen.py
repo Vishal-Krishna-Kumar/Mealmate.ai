@@ -13,6 +13,7 @@ Best-effort image lookup pulls the lead thumbnail from Wikipedia
 from __future__ import annotations
 
 import logging
+import re
 import urllib.parse
 import urllib.request
 from typing import Any
@@ -75,6 +76,10 @@ Rules:
 - Provide between 4 and 12 instruction steps.
 - Use integer minutes for prep_time / cook_time.
 - Nutrition values must be best-effort estimates per serving.
+- The recipe title should preserve the user's requested dish phrase when it
+  is a specific name, instead of renaming the dish to a different variant.
+  For example, if the user asks for "cheese pizza", return a title like
+  "Cheese Pizza" rather than "Margherita Pizza".
 - If the user has allergies, swap conflicting ingredients with safe equivalents
   and reflect that in the title (e.g. 'Dairy-Free Chicken Biryani').
 - If the dietary preferences include 'vegetarian' or 'vegan', the recipe MUST
@@ -90,6 +95,80 @@ def _build_prompt(req: GenerateRecipeRequest) -> str:
     )
 
 
+# Words that say nothing about WHICH dish this is. Stripped from Wikipedia
+# search queries and excluded from "specific token" overlap checks so two
+# different recipes whose titles share a generic word like "chicken" don't
+# end up with the same Wikipedia photo.
+_GENERIC_TITLE_WORDS: frozenset[str] = frozenset(
+    {
+        # Proteins (generic)
+        "chicken", "beef", "pork", "lamb", "mutton", "turkey", "duck",
+        "fish", "salmon", "tuna", "shrimp", "prawn", "prawns", "crab",
+        "lobster", "tofu", "paneer", "egg", "eggs", "veggie", "vegan",
+        "vegetable", "vegetables", "meat", "seafood",
+        # Quality / heat / texture adjectives
+        "healthy", "healthier", "easy", "quick", "simple", "fast",
+        "classic", "traditional", "authentic", "homemade", "gourmet",
+        "hearty", "light", "fresh", "best", "perfect", "ultimate",
+        "amazing", "delicious", "tasty", "spicy", "mild", "medium",
+        "hot", "sweet", "savory", "savoury", "creamy", "crispy",
+        # Preparation / format words
+        "stir", "fry", "bake", "baked", "grill", "grilled", "roast",
+        "roasted", "fried", "steamed", "boiled", "sauteed", "sautéed",
+        "with", "and", "the", "dish", "recipe", "style", "sauce",
+        "bowl", "plate",
+        # Meal-time labels
+        "breakfast", "lunch", "dinner", "brunch", "snack", "dessert",
+    }
+)
+
+# Ingredients that don't visually distinguish a dish (every recipe has
+# salt + oil). Used by Pollinations prompt-builder to skip past them when
+# looking for a distinctive ingredient to add to the prompt.
+_GENERIC_INGREDIENT_HINTS: frozenset[str] = frozenset(
+    {
+        "salt", "oil", "olive oil", "water", "sugar", "pepper",
+        "black pepper", "butter", "flour", "garlic", "onion", "onions",
+        "ginger", "chili", "chilli", "chili powder", "cumin", "coriander",
+        "salt and pepper",
+    }
+)
+
+
+def _clean_image_query(text: str) -> str:
+    """Strip generic words from a recipe title before sending to Wikipedia.
+
+    "Healthy Chicken Chili" → "chili". "Healthier Cashew Stir-fry" →
+    "cashew". This keeps Wikipedia search focused on the SPECIFIC dish
+    name rather than the generic protein/quality words that drown out the
+    signal.
+    """
+    if not text:
+        return ""
+    tokens = re.split(r"[^a-zA-Z]+", text.lower())
+    keep = [
+        t for t in tokens
+        if t and len(t) >= 3 and t not in _GENERIC_TITLE_WORDS
+    ]
+    if not keep:
+        # Nothing specific survived; fall back to the original cleaned text
+        # so Wikipedia at least gets something to search on.
+        return " ".join(t for t in tokens if t).strip()
+    return " ".join(keep)
+
+
+def _specific_tokens(text: str) -> set[str]:
+    """Return the SPECIFIC (non-generic) tokens in ``text``.
+
+    Used to verify that a Wikipedia article title shares a meaningful word
+    with the search query — not just a generic protein like "chicken".
+    """
+    return {
+        t for t in re.split(r"[^a-zA-Z]+", text.lower())
+        if t and len(t) >= 3 and t not in _GENERIC_TITLE_WORDS
+    }
+
+
 def _fetch_wikipedia_image(query: str) -> str | None:
     """Best-effort lead-thumbnail lookup. Returns a direct image URL or None.
 
@@ -97,20 +176,21 @@ def _fetch_wikipedia_image(query: str) -> str | None:
     volume) with ``generator=search`` + ``prop=pageimages`` to fetch the
     page image of the most relevant article in a single call.
 
-    We require the matched article's title to share at least one
-    non-stopword token (>= 4 chars) with the query. Without this guard,
-    fuzzy MediaWiki search happily returns unrelated photos for
-    niche / AI-coined dish names (e.g. it returns a paprika photo for
-    "Spicy Indian Lobster Masala").
+    We require the matched article's title to share at least one *specific*
+    non-stopword token with the query. "Specific" means it isn't a generic
+    protein/style word like "chicken", "beef", "healthy", "stir", etc. —
+    without this guard, fuzzy MediaWiki search happily returns the same Kung
+    Pao photo for every chicken recipe just because "chicken" overlaps.
     """
-    if not query.strip():
+    cleaned = _clean_image_query(query)
+    if not cleaned:
         return None
     params = {
         "action": "query",
         "format": "json",
         "generator": "search",
-        "gsrsearch": f"{query.strip()} dish",
-        "gsrlimit": "1",
+        "gsrsearch": f"{cleaned} dish",
+        "gsrlimit": "3",
         "prop": "pageimages",
         "piprop": "thumbnail|original",
         "pithumbsize": "600",
@@ -126,21 +206,28 @@ def _fetch_wikipedia_image(query: str) -> str | None:
         logger.debug("wikipedia image lookup failed for %r: %s", query, exc)
         return None
 
-    # Build the set of meaningful query tokens we'll compare the article
-    # title against.
-    query_tokens = {
-        t for t in query.lower().split() if len(t) >= 4 and t.isalpha()
-    }
+    specific_query_tokens = _specific_tokens(cleaned)
     pages = (data.get("query") or {}).get("pages") or {}
-    for page in pages.values():
-        title = str(page.get("title") or "").lower()
-        title_tokens = {t.strip(",.()") for t in title.split() if len(t) >= 4}
-        # Reject obviously off-topic results when we have query tokens to
-        # check against. If the query was pure stopwords/short words, we
-        # accept whatever Wikipedia returned.
-        if query_tokens and not (query_tokens & title_tokens):
+    # Wikipedia's pages dict isn't ordered — sort by ``index`` so we walk
+    # the results in search-relevance order (1 = best match).
+    ordered = sorted(
+        pages.values(),
+        key=lambda p: int(p.get("index", 999)) if isinstance(p, dict) else 999,
+    )
+    for page in ordered:
+        title = str(page.get("title") or "")
+        title_specific = _specific_tokens(title)
+        # Require a SPECIFIC (non-generic) token to overlap. If the only
+        # overlap is a generic word like "chicken" we reject — that's how
+        # "Healthy Chicken Chili" was incorrectly matching "Kung Pao Chicken".
+        if specific_query_tokens and not (specific_query_tokens & title_specific):
             logger.debug(
-                "wikipedia image rejected: query=%r article=%r", query, title
+                "wikipedia image rejected (no specific token overlap): "
+                "query=%r article=%r query_tokens=%s title_tokens=%s",
+                cleaned,
+                title,
+                specific_query_tokens,
+                title_specific,
             )
             continue
         thumb = page.get("thumbnail") or {}
@@ -152,7 +239,7 @@ def _fetch_wikipedia_image(query: str) -> str | None:
     return None
 
 
-def _pollinations_image_url(query: str) -> str | None:
+def _pollinations_image_url(query: str, *, cuisine: str | None = None, ingredients: list[str] | None = None) -> str | None:
     """Always-available fallback that returns a Pollinations.AI text-to-image URL.
 
     Pollinations exposes a free, key-less endpoint at
@@ -163,17 +250,33 @@ def _pollinations_image_url(query: str) -> str | None:
 
     The URL is constructed deterministically (no HTTP call from our side)
     so this never fails or blocks; if the upstream is down the client just
-    falls back to its placeholder image.
+    falls back to its placeholder image. We seed the URL on the *full*
+    prompt (title + cuisine + first ingredient) rather than just the title,
+    so two recipes that share a generic title prefix (e.g. "Healthy Chicken
+    Chili" vs "Healthy Chicken Biryani") still get distinct images.
     """
     q = query.strip()
     if not q:
         return None
-    prompt = f"{q}, food photography, professional plating, top down, natural light"
+    # Build a richer prompt so similarly-named recipes don't collide.
+    descriptors: list[str] = [q]
+    if cuisine:
+        descriptors.append(f"{cuisine.strip()} cuisine")
+    if ingredients:
+        # Pick the first ingredient that's a distinctive noun (skip generic
+        # ones like 'salt', 'oil', 'water', 'pepper') so the seed varies.
+        for ing in ingredients[:6]:
+            token = (ing or "").strip().lower()
+            if token and token not in _GENERIC_INGREDIENT_HINTS and len(token) >= 3:
+                descriptors.append(token)
+                break
+    descriptors.append("food photography, professional plating, top down, natural light")
+    prompt = ", ".join(descriptors)
     encoded = urllib.parse.quote(prompt, safe="")
     # ``nologo=true`` removes the Pollinations watermark.
-    # ``seed`` is derived from the query so the same dish always gets the
-    # same image across requests (stable caching, predictable UX).
-    seed = abs(hash(q.lower())) % 100_000
+    # ``seed`` is derived from the FULL prompt so distinct recipes get
+    # distinct images even when their titles share generic prefixes.
+    seed = abs(hash(prompt.lower())) % 100_000
     return (
         "https://image.pollinations.ai/prompt/"
         f"{encoded}?width=600&height=400&nologo=true&seed={seed}"
@@ -245,12 +348,25 @@ def generate(req: GenerateRecipeRequest) -> GenerateRecipeResponse:
     # Image lookup is best-effort and never blocks saving the recipe.
     # Try Wikipedia first (real photos of real-world dishes); if no hit,
     # fall back to a Pollinations.AI generated image so AI-coined or
-    # niche dishes still have a relevant visual.
+    # niche dishes still have a relevant visual. We pass the recipe's
+    # cuisine + first distinctive ingredient to the Pollinations prompt
+    # builder so two recipes with similar generic titles (e.g. "Healthy
+    # Chicken Chili" vs "Healthier Chicken Stir-fry") get DIFFERENT seeds
+    # and therefore different images.
+    ingredient_names = [i.name for i in recipe.ingredients]
     img = (
         _fetch_wikipedia_image(recipe.title)
         or _fetch_wikipedia_image(req.query)
-        or _pollinations_image_url(recipe.title)
-        or _pollinations_image_url(req.query)
+        or _pollinations_image_url(
+            recipe.title,
+            cuisine=recipe.cuisine,
+            ingredients=ingredient_names,
+        )
+        or _pollinations_image_url(
+            req.query,
+            cuisine=recipe.cuisine,
+            ingredients=ingredient_names,
+        )
     )
     if img:
         recipe.image_url = img

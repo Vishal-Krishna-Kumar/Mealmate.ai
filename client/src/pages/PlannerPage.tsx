@@ -45,7 +45,13 @@ const OBJECTIVES: { value: PlannerObjective; label: string; hint: string }[] = [
 
 function recipeFromSlot(value: unknown): Recipe | null {
   if (!value || typeof value === 'string') return null;
-  return value as Recipe;
+
+  const recipe = value as Recipe & { _id?: string };
+  if (!recipe.id && recipe._id) {
+    return { ...recipe, id: String(recipe._id) };
+  }
+
+  return recipe;
 }
 
 export function PlannerPage() {
